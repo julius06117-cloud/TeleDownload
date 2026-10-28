@@ -20,7 +20,7 @@ _COUNT_KEYS = (
     "partial",
 )
 
-_TERMINAL = {"complete", "error", "partial", "cancelled", "rejected"}
+_TERMINAL = {"complete", "error", "partial", "cancelled", "rejected", "paused", "removed"}
 
 
 def empty_counts() -> dict:
@@ -77,7 +77,7 @@ def canonical_key(kind: str, params: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
-def new_job(kind: str, params: dict, key: str | None) -> dict:
+def new_job(kind: str, params: dict, key: str | None, *, added_by: str = "agent") -> dict:
     now = utcnow_iso()
     import secrets
 
@@ -99,6 +99,7 @@ def new_job(kind: str, params: dict, key: str | None) -> dict:
         "bytesTotal": 0,
         "files": [],
         "resolvedChats": [],
+        "addedBy": "user" if added_by == "user" else "agent",
     }
     recompute(job)
     return job

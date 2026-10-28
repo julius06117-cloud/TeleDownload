@@ -20,6 +20,7 @@ from tgdl.jobs import (
     fail_job,
     finalize_job,
     new_job,
+    recompute,
     recover_stale_jobs,
 )
 from tgdl.models import state_for
@@ -27,6 +28,7 @@ from tgdl.naming import plan_items
 from tgdl.params import query_from_params
 from tgdl.progress import NullReporter, ProgressReporter
 from tgdl.resume import build_sidecar, read_sidecar, write_sidecar
+from tgdl.taskview import SpeedMeter, apply_task_view, delete_recorded_files, hornet_status
 from tgdl.transfer import sleep_or_cancel
 
 log = logging.getLogger("tgdl.service")
@@ -65,6 +67,8 @@ class Service:
         self._client = None
         self._client_lock = asyncio.Lock()
         self._save_at = 0.0
+        self._speed = SpeedMeter()
+        self._pausing: set[str] = set()
         self.recover_stale()
 
     def recover_stale(self) -> None:
@@ -87,15 +91,64 @@ class Service:
 
     def get_job(self, job_id: str) -> dict | None:
         try:
-            return self.store.get(job_id)
+            return self._present(self.store.get(job_id))
         except ValueError:
             return None
 
     def list_jobs(self, limit: int = 50) -> list[dict]:
-        return self.store.list_jobs(limit)
+        return [job for job in (self._present(item) for item in self.store.list_jobs(limit)) if job]
 
     def latest_job(self) -> dict | None:
-        return self.store.latest()
+        return self._present(self.store.latest())
+
+    def _raw(self, job_id: str) -> dict:
+        try:
+            job = self.store.get(job_id)
+        except ValueError as exc:
+            raise TgdlError(f"job not found: {job_id}") from exc
+        if job is None:
+            raise TgdlError(f"job not found: {job_id}")
+        return job
+
+    def _present(self, job: dict | None) -> dict | None:
+        if not job:
+            return None
+        active = hornet_status(job) == "active"
+        speed = self._speed.observe(
+            str(job.get("id") or ""),
+            int(job.get("bytesWritten") or 0),
+            active=active,
+        )
+        return apply_task_view(job, speed_bps=speed)
+
+    async def account(self) -> dict:
+        """Whether this process's session is logged in. Does not create a job."""
+        body = {
+            "loggedIn": False,
+            "userId": None,
+            "username": None,
+            "displayName": None,
+            "reason": None,
+        }
+        if not self.cfg.has_credentials:
+            body["reason"] = (
+                "missing api_id/api_hash; set TGDL_API_ID and TGDL_API_HASH, then run: tgdl login"
+            )
+            return body
+        try:
+            client = await self._client_conn()
+        except AuthError as exc:
+            body["reason"] = str(exc)
+            return body
+        from tgdl.telegram_io import user_public
+
+        me = await client.get_me()
+        if me is None:
+            body["reason"] = "not logged in; run: tgdl login"
+            return body
+        body.update(user_public(me))
+        body["loggedIn"] = True
+        return body
 
     async def cancel(self, job_id: str) -> dict:
         job = self.get_job(job_id)
@@ -116,7 +169,79 @@ class Service:
             self.store.save(job)
         return self.get_job(job_id) or job
 
-    async def list_chats(self, *, limit: int, groups_only: bool, wait: bool) -> dict:
+    async def pause(self, job_id: str) -> dict:
+        """Stop the worker after the current chunk and keep the part files."""
+        job = self._raw(job_id)
+        if job.get("status") == "removed":
+            raise RejectedError("task was removed")
+        if hornet_status(job) == "paused":
+            return self._present(job) or job
+        if hornet_status(job) != "active":
+            raise RejectedError(f"cannot pause a {hornet_status(job)} task")
+        self._pausing.add(job_id)
+        try:
+            event = self._cancels.get(job_id)
+            if event is not None:
+                event.set()
+                task = self._tasks.get(job_id)
+                if task is not None:
+                    await asyncio.wait({task}, timeout=20)
+            latest = self.store.get(job_id) or job
+            if latest.get("status") in {"complete", "error", "rejected", "removed"}:
+                return self._present(latest) or latest
+            self._mark_open_partial(latest)
+            latest["status"] = "paused"
+            latest["exitCode"] = 4
+            latest["ok"] = False
+            latest["done"] = True
+            latest["error"] = "已暂停，可以继续"
+            self.store.save(latest)
+            return self._present(latest) or latest
+        finally:
+            self._pausing.discard(job_id)
+
+    async def resume(self, job_id: str) -> dict:
+        """Continue a paused, partial, cancelled, or failed download."""
+        job = self._raw(job_id)
+        status = job.get("status")
+        if status == "removed":
+            raise RejectedError("task was removed")
+        if status == "complete" or status == "running" or not job.get("done"):
+            return {"existing": True, "job": self._present(job) or job}
+        if job.get("kind") != "download":
+            raise UsageError("only a download can be resumed")
+        if status not in {"paused", "partial", "cancelled", "error"}:
+            raise RejectedError(f"cannot resume a {hornet_status(job)} task")
+        params = dict(job.get("params") or {})
+        params["resume"] = True
+        params["force"] = False
+        if status == "error":
+            return await self._restart(job, params, False)
+        return await self.download(params, wait=False)
+
+    async def remove(self, job_id: str, *, delete_files: bool = False) -> dict:
+        job = self._raw(job_id)
+        event = self._cancels.get(job_id)
+        if event is not None:
+            event.set()
+            task = self._tasks.get(job_id)
+            if task is not None:
+                await asyncio.wait({task}, timeout=20)
+            job = self.store.get(job_id) or job
+        notes = delete_recorded_files(job) if delete_files else []
+        job["status"] = "removed"
+        job["done"] = True
+        job["ok"] = False
+        if not isinstance(job.get("exitCode"), int):
+            job["exitCode"] = 0
+        if notes:
+            job["error"] = "已移除，但有文件没能删除：" + "; ".join(notes)
+        else:
+            job["error"] = None
+        self.store.save(job)
+        return self._present(job) or job
+
+    async def list_chats(self, *, limit: int, groups_only: bool, wait: bool, added_by: str = "agent") -> dict:
         if limit < 1 or limit > 5000:
             raise UsageError("limit must be between 1 and 5000")
         key = f"list:{limit}:{int(bool(groups_only))}"
@@ -124,36 +249,37 @@ class Service:
         if running is not None:
             return await self._wait_existing(running, wait)
         params = {"limit": limit, "groupsOnly": bool(groups_only)}
-        job = new_job("list-chats", params, key)
+        job = new_job("list-chats", params, key, added_by=added_by)
         return await self._spawn(job, self._run_list, wait, existing=False)
 
-    async def scan(self, params: dict, *, wait: bool) -> dict:
+    async def scan(self, params: dict, *, wait: bool, added_by: str = "agent") -> dict:
         key = canonical_key("scan", params)
         running = self._running_by_key(key)
         if running is not None:
             return await self._wait_existing(running, wait)
-        job = new_job("scan", params, key)
+        job = new_job("scan", params, key, added_by=added_by)
         return await self._spawn(job, self._run_scan, wait, existing=False)
 
-    async def download(self, params: dict, *, wait: bool) -> dict:
+    async def download(self, params: dict, *, wait: bool, added_by: str = "agent") -> dict:
         key = canonical_key("download", params)
         if not params.get("force"):
             running = self._running_by_key(key)
             if running is not None:
                 return await self._wait_existing(running, wait)
             existing = self.store.find_by_key(key)
-            if existing and existing.get("status") in {"partial", "cancelled", "running"}:
+            if existing and existing.get("status") in {"partial", "cancelled", "paused", "running"}:
                 return await self._restart(existing, params, wait)
             if existing and outputs_present(existing):
                 self.store.save(existing)
-                return {"existing": True, "job": self.store.get(existing["id"]) or existing}
+                fresh = self.store.get(existing["id"]) or existing
+                return {"existing": True, "job": self._present(fresh) or fresh}
         active = self._active_download()
         if active is not None:
             raise RejectedError(
                 f"download {active['id']} is already running",
                 jobId=active["id"],
             )
-        job = new_job("download", params, key)
+        job = new_job("download", params, key, added_by=added_by)
         return await self._spawn(job, self._run_download, wait, existing=False)
 
     async def _restart(self, job: dict, params: dict, wait: bool) -> dict:
@@ -182,7 +308,7 @@ class Service:
             task = self._tasks.get(job["id"])
             if task is not None:
                 await task
-        latest = self.store.get(job["id"]) or job
+        latest = self._present(self.store.get(job["id"]) or job)
         return {"existing": True, "job": latest}
 
     def _running_by_key(self, key: str) -> dict | None:
@@ -210,7 +336,7 @@ class Service:
         task.add_done_callback(lambda done, job_id=job["id"]: self._on_done(job_id, done))
         if wait:
             await task
-        latest = self.store.get(job["id"]) or job
+        latest = self._present(self.store.get(job["id"]) or job)
         return {"existing": existing, "job": latest}
 
     def _on_done(self, job_id: str, task: asyncio.Task) -> None:
@@ -278,6 +404,8 @@ class Service:
     def _save(self, job: dict, *, force: bool = False) -> None:
         now = time.monotonic()
         if force or now - self._save_at >= 0.4:
+            recompute(job)
+            self._present(job)
             self.store.save(job)
             self._save_at = now
         try:

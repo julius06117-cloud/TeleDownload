@@ -122,16 +122,24 @@ def help_payload() -> dict:
             },
             {
                 "name": "serve",
-                "summary": "Loopback HTTP API on 127.0.0.1. Same jobs as the CLI.",
-                "flags": ["--host", "--port", "--json"],
+                "summary": "Loopback HTTP API and web UI on 127.0.0.1. Same jobs as the CLI.",
+                "flags": ["--host", "--port", "--open", "--json"],
+            },
+            {
+                "name": "ui",
+                "summary": "Open the local web UI. Starts serve when it is not already running.",
+                "flags": ["--host", "--port", "--open", "--json"],
             },
             {"name": "version", "summary": "Version and runtime.", "flags": ["--json"]},
             {"name": "help", "summary": "This catalog.", "flags": ["--json"]},
         ],
         "endpoints": [
+            {"method": "GET", "path": "/"},
+            {"method": "GET", "path": "/api/v1/ui/bootstrap"},
             {"method": "GET", "path": "/api/v1/ping"},
             {"method": "GET", "path": "/api/v1/version"},
             {"method": "GET", "path": "/api/v1/help"},
+            {"method": "GET", "path": "/api/v1/account"},
             {"method": "GET", "path": "/api/v1/chats"},
             {"method": "POST", "path": "/api/v1/scan"},
             {"method": "POST", "path": "/api/v1/download"},
@@ -139,6 +147,9 @@ def help_payload() -> dict:
             {"method": "GET", "path": "/api/v1/tasks"},
             {"method": "GET", "path": "/api/v1/status"},
             {"method": "POST", "path": "/api/v1/cancel"},
+            {"method": "POST", "path": "/api/v1/pause"},
+            {"method": "POST", "path": "/api/v1/resume"},
+            {"method": "POST", "path": "/api/v1/remove"},
         ],
         "notes": [
             "Ids that can exceed 2^53 (chatId, messageId, senderId, fileUniqueId) are JSON strings.",
@@ -146,6 +157,9 @@ def help_payload() -> dict:
             "Resume writes name.ext.part plus name.ext.tgdl.json and renames the part when the size matches.",
             "A second download with the same chats, filters, and output returns the existing job unless --force.",
             "Do not put api_hash on the command line. Use the environment or a gitignored config file.",
+            "The web UI is http://127.0.0.1:<port>/ (default port 18765). It is loopback-only. Login stays on `tgdl login`.",
+            "job.task is the Hornet-shaped view (status waiting|active|paused|complete|error|removed). job.status stays the tgdl lifecycle. speedBps is 0 unless task.status is active.",
+            "POST /api/v1/pause, /resume, and /remove take {id}. remove also accepts deleteFiles.",
         ],
     }
 
@@ -168,5 +182,6 @@ def help_text() -> str:
         lines.append(f"  {item['code']}  {item['name']:<10} {item['meaning']}")
     lines.append("")
     lines.append("HTTP: tgdl serve  then  GET/POST /api/v1/*  with Authorization: Bearer <token>")
+    lines.append("Web UI: tgdl ui    or    tgdl serve --open    default http://127.0.0.1:18765/")
     lines.append("token file: $TGDL_DATA_DIR/api-token   (default .tgdl/api-token)")
     return "\n".join(lines) + "\n"

@@ -124,6 +124,21 @@ def _prompt(label: str) -> str:
     return input().strip()
 
 
+def user_public(me: object | None) -> dict:
+    """Fields safe to show in the CLI and the local UI. No phone number."""
+    if me is None:
+        return {"userId": None, "username": None, "displayName": None}
+    display = " ".join(
+        part for part in (getattr(me, "first_name", None), getattr(me, "last_name", None)) if part
+    )
+    user_id = getattr(me, "id", None)
+    return {
+        "userId": None if user_id is None else str(user_id),
+        "username": getattr(me, "username", None),
+        "displayName": display or None,
+    }
+
+
 async def login(client: TelegramClient, phone: str | None, session: Path) -> dict:
     await client.connect()
     try:
@@ -143,15 +158,10 @@ async def login(client: TelegramClient, phone: str | None, session: Path) -> dic
         me = await client.get_me()
     finally:
         chmod_private(session)
-    display = " ".join(
-        part for part in (getattr(me, "first_name", None), getattr(me, "last_name", None)) if part
-    )
     return {
         "alreadyAuthorized": already,
         "session": str(session),
-        "userId": str(me.id),
-        "username": me.username,
-        "displayName": display or None,
+        **user_public(me),
     }
 
 

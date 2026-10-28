@@ -6,11 +6,12 @@ Human setup is Simplified Chinese in [`README.zh-CN.md`](README.zh-CN.md). CLI o
 
 ## What this is
 
-tgdl downloads documents (and, optionally, photos) from Telegram **group chats** using a **user account** (Telethon / MTProto). It is not a bot-API helper and not a GUI.
+tgdl downloads documents (and, optionally, photos) from Telegram **group chats** using a **user account** (Telethon / MTProto). It is not a bot-API helper. Humans get a loopback web UI; agents keep using the CLI and JSON API. Both call the same jobs.
 
 - Python 3.11+. Package `tgdl`. Version in `tgdl/__init__.py`.
-- Commands: `login`, `list-chats`, `scan`, `download`, `status`, `serve`, `version`, `help`.
+- Commands: `login`, `list-chats`, `scan`, `download`, `status`, `serve`, `ui`, `version`, `help`.
 - Loopback API: `http://127.0.0.1:18765/api/v1/*` with a bearer token.
+- Web UI: `http://127.0.0.1:18765/` (`tgdl ui` or `tgdl serve --open`). Static files in `tgdl/web/`. Login stays `tgdl login`.
 - Concurrency: asyncio tasks on **one** `TelegramClient`, capped by `--workers` (default 4).
 - Resume: `*.part` + `*.tgdl.json`, then rename.
 
@@ -21,7 +22,8 @@ Do not invent `api_id` / `api_hash` / phone numbers. Tests must not open Telegra
 | Path | Responsibility |
 |------|----------------|
 | `tgdl/cli.py` | Parser, exit codes, `--json`, proxy to `serve`, SIGINT |
-| `tgdl/api.py` | `/api/v1/*`, Host + token middleware, `start_api` (127.0.0.1 only) |
+| `tgdl/api.py` | `/api/v1/*`, Host + token middleware, loopback UI + bootstrap, `start_api` (127.0.0.1 only) |
+| `tgdl/web/` | Chinese single-page UI. No Node toolchain. Served by `api.py` |
 | `tgdl/api_client.py` | Discover a live server, poll jobs, write `api-pid` / `api-port` / `api-token` |
 | `tgdl/service.py` | Shared job runner: scan, download, list-chats, cancel, idempotency |
 | `tgdl/telegram_io.py` | Telethon only. Login, resolve, history, `iter_download`, FloodWait |
@@ -51,7 +53,7 @@ Runtime (never commit): `.env`, `config.yaml`, `*.session`, `.tgdl/` (`api-token
 5. **`flood_sleep_threshold=0`** on the client so FloodWait is handled in `telegram_io` after a checkpoint. Over `--flood-cap` → exit 4, part kept.
 6. **Exit codes** 0 ok, 1 failure, 2 usage, 3 auth, 4 partial/timeout, 5 rejected. Do not renumber. JSON fields are add-only (`SCHEMA` stays 1).
 7. **String ids** for `chatId`, `messageId`, `senderId`, `fileUniqueId`.
-8. **API** binds `127.0.0.1` only. Token via `Authorization: Bearer` or `X-Token` (`hmac.compare_digest`). `Host` must be `127.0.0.1:<port>` or `localhost:<port>`. No CORS.
+8. **API** binds `127.0.0.1` only. Token via `Authorization: Bearer` or `X-Token` (`hmac.compare_digest`). `Host` must be `127.0.0.1:<port>` or `localhost:<port>`. No CORS. The exceptions are `GET /`, `GET /ui/*`, and `GET /api/v1/ui/bootstrap`: still loopback-only, still no CORS. Bootstrap additionally requires `X-Tgdl-Ui: 1` and refuses a cross-site `Sec-Fetch-Site` or a foreign `Origin`. It returns the API token for the local page (`sessionStorage`). Do not log that body. Do not put the token in the HTML or the query string.
 9. **One download at a time** inside a process. Same idempotency key returns the running or resumable job unless `--force`. `--force` still rejects a second download while one task is active.
 10. **Session lock.** If `discover_api` succeeds, `list-chats` / `scan` / `download` go through HTTP. `login` errors out instead of opening the sqlite session.
 11. **Secrets.** No credential flags. Do not log the API hash, login code, or API token. Do not commit them.
@@ -65,7 +67,7 @@ Invite links call `ImportChatInviteRequest` and therefore **join** the chat. Tha
 
 A job file is `data_dir/jobs/job_<16 hex>.json`.
 
-- `status`: `queued | running | complete | error | partial | cancelled | rejected` (`queued` is reserved).
+- `status`: `queued | running | complete | error | partial | cancelled | rejected | paused | removed` (`queued` is reserved). The UI reads `job.task.status`: `waiting | active | paused | complete | error | removed`. `speedBps` is 0 unless that status is `active`. Do not rename the tgdl `status` strings.
 - `kind`: `list-chats | scan | download`.
 - File `state`: `listed | pending | active | complete | skipped | failed | partial`.
 - `listed` means a scan row, not an unfinished download. `finalize_job` only treats `pending` / `active` / `partial` as unfinished work.
