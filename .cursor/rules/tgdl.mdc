@@ -1,0 +1,14 @@
+---
+description: tgdl — agent-first Telegram group file downloader (Telethon, resumable CLI + loopback /api/v1)
+alwaysApply: true
+---
+
+Read `AGENTS.md` at the repo root first. It has the file map, resume rules, and definition of done.
+
+Key rules:
+- Python 3.11+, Telethon user account. One `TelegramClient` per process. Workers are asyncio tasks (`--workers`), not OS threads.
+- Resume via `iter_download` into `*.part` + `*.tgdl.json`. Align the offset to 4096 bytes. Do not use `download_media(path)` (it truncates).
+- Exit codes stay 0 ok, 1 failure, 2 usage, 3 auth, 4 partial, 5 rejected. JSON fields are add-only. Update `docs/AGENT_API.md` and `helptext.py` together.
+- API binds `127.0.0.1` only, bearer or `X-Token`, Host must be loopback. Tests bind `127.0.0.1` only.
+- Never commit `.env`, `config.yaml`, `*.session`, `.tgdl/`, or API tokens. No credential flags.
+- Done = `pytest` passes, and `python -m tgdl help --json` still matches the parser.

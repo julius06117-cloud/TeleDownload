@@ -1,0 +1,19 @@
+# Copy to config.yaml. Placeholders only — do not put real secrets in git.
+# Precedence: CLI flags > environment variables > this file > built-in defaults.
+# api_id / api_hash / phone may also come from .env (TGDL_API_ID, TGDL_API_HASH, TGDL_PHONE).
+
+api_id: 0
+api_hash: "replace-me"
+phone: ""
+
+session: ".tgdl/tgdl.session"
+output: "downloads"
+data_dir: ".tgdl"
+workers: 4
+group_by_month: true
+include_photos: false
+flood_cap: "15m"
+
+api_host: "127.0.0.1"
+api_port: 18765
+# api_token: ""  # prefer TGDL_API_TOKEN or the generated .tgdl/api-token file
