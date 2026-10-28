@@ -24,10 +24,11 @@ tgdl list-chats --json
 tgdl scan --chat @example --ext pdf --json
 tgdl download --chat @example --ext pdf --workers 4 --json
 tgdl status --json
-tgdl serve --json    # loopback API; progress stays on stderr
+tgdl serve --json    # loopback API + web UI; progress stays on stderr
+tgdl ui              # open http://127.0.0.1:18765/ (starts serve if needed)
 ```
 
-`login` is interactive (phone code, optional 2FA) and is **not** exposed on HTTP. Every later command reuses the session file.
+`login` is interactive (phone code, optional 2FA) and is **not** exposed on HTTP. Every later command reuses the session file. The web UI calls the same `/api/v1` jobs; it does not log in.
 
 Do not invent API credentials. Create them at <https://my.telegram.org> and keep them in `.env` or `config.yaml` (both gitignored).
 
@@ -36,10 +37,11 @@ Do not invent API credentials. Create them at <https://my.telegram.org> and keep
 ## Architecture
 
 ```
-tgdl login | list-chats | scan | download | status | serve
+tgdl login | list-chats | scan | download | status | serve | ui
         |                         |
         |  if .tgdl/api-pid is live and /api/v1/ping answers
-        +-------- proxy --------> 127.0.0.1:18765/api/v1/*  + Bearer token
+        +-------- proxy --------> 127.0.0.1:18765/  (Chinese UI)
+                                  127.0.0.1:18765/api/v1/*  + Bearer token
                                   api.py  (Host must be loopback)
                                        |
                                   service.py   one job store, one TelegramClient
@@ -53,7 +55,7 @@ tgdl login | list-chats | scan | download | status | serve
 - **One process owns the session.** Telethon's session is SQLite. `tgdl serve` holds it; the CLI forwards `list-chats`, `scan`, and `download` to that process. `login` refuses to start while serve is up.
 - **Workers are asyncio tasks**, not OS threads. Telethon's client is async. `--workers` (default 4, max 32) caps how many `iter_download` streams run at once on that single client.
 - **stdout is the result. stderr is logs and progress.** `--json` prints one JSON document. A TTY gets a Rich bar; a pipe gets plain progress lines.
-- **No GUI.** Humans use the CLI and `README.zh-CN.md`.
+- **Local web UI.** `tgdl serve` also serves `tgdl/web/` at `http://127.0.0.1:<port>/`. The page asks a loopback-only bootstrap route for the API token and keeps it in `sessionStorage`. Humans can follow `README.zh-CN.md`.
 
 Runtime files live in `.tgdl/` (`jobs/`, `api-token`, `api-port`, `api-pid`, default session). Do not commit them.
 
@@ -64,7 +66,8 @@ Runtime files live in `.tgdl/` (`jobs/`, `api-token`, `api-port`, `api-pid`, def
 | Path | Responsibility |
 |------|----------------|
 | `tgdl/cli.py` | argparse, exit codes, JSON vs human output, proxy-or-local dispatch, signals |
-| `tgdl/api.py` | `GET/POST /api/v1/*`, loopback bind, Host check, bearer token |
+| `tgdl/api.py` | `GET/POST /api/v1/*`, loopback bind, Host check, bearer token, UI routes |
+| `tgdl/web/` | Static Chinese UI (`index.html`, `app.css`, `app.js`). No build step |
 | `tgdl/api_client.py` | CLI → serve HTTP client, runtime pid/port/token files |
 | `tgdl/service.py` | Job lifecycle shared by CLI and API. Idempotent download, worker pool |
 | `tgdl/telegram_io.py` | Telethon login, dialogs, history scan, `iter_download` + FloodWait |
@@ -95,7 +98,7 @@ Break these and agents, resume, or the session will misbehave.
 7. **Exit codes stay 0–5** (`contract.py`). JSON fields are add-only. Update `docs/AGENT_API.md` and `help_payload()` together.
 8. **Ids that do not fit in a JS number are strings** (`chatId`, `messageId`, `senderId`, `fileUniqueId`).
 9. **Secrets stay out of git and out of argv.** No `--api-hash` flag. `.env`, `config.yaml`, `*.session`, `.tgdl/api-token` are gitignored.
-10. **The API binds `127.0.0.1` only.** Reject any other host. Require `Authorization: Bearer` or `X-Token`. Require `Host: 127.0.0.1:<port>` or `localhost:<port>`.
+10. **The API binds `127.0.0.1` only.** Reject any other host. Require `Authorization: Bearer` or `X-Token` on job routes. Require `Host: 127.0.0.1:<port>` or `localhost:<port>`. The UI documents and `GET /api/v1/ui/bootstrap` are the only unauthenticated routes; bootstrap still requires loopback, `X-Tgdl-Ui: 1`, and refuses cross-site `Origin`. No CORS.
 11. **One active download per process.** A second download is exit 5 / HTTP 409 until the first finishes or is cancelled. The same key returns the running job (`existing: true`).
 12. **Ctrl+C finishes the current chunk**, fsyncs, writes the sidecar, and exits 4. A second Ctrl+C cancels the tasks.
 
@@ -111,10 +114,13 @@ tgdl list-chats [--limit N] [--groups-only] [--json]
 tgdl scan --chat TARGET [--chat TARGET ...] [filters] [--json]
 tgdl download --chat TARGET ... [--workers N] [--output DIR] [--json]
 tgdl status [JOB_ID] [--json]
-tgdl serve [--port 18765] [--json]
+tgdl serve [--port 18765] [--open] [--json]
+tgdl ui [--port 18765] [--json]
 tgdl version --json
 tgdl help --json
 ```
+
+`tgdl ui` opens `http://127.0.0.1:<port>/` (default **18765**). If serve is already running it only opens the browser. `tgdl serve --open` starts the server and opens the same URL.
 
 Global flags (before or after the command): `--json`, `--config`, `--data-dir`, `--session`, `--quiet`, `--verbose`.
 
@@ -136,9 +142,12 @@ Exit codes: `0` ok · `1` failure · `2` usage · `3` auth/session · `4` partia
 
 | Method | Path | Role |
 |--------|------|------|
+| GET | `/` | Chinese web UI. No bearer token |
+| GET | `/api/v1/ui/bootstrap` | Loopback token handoff for that page (`X-Tgdl-Ui: 1`) |
 | GET | `/api/v1/ping` | Liveness. Does not open Telegram |
 | GET | `/api/v1/version` | Same payload as `version --json` |
 | GET | `/api/v1/help` | Same payload as `help --json` |
+| GET | `/api/v1/account` | `{loggedIn, userId, username, displayName, reason}` |
 | GET | `/api/v1/chats` | `list-chats` |
 | POST | `/api/v1/scan` | Scan job |
 | POST | `/api/v1/download` | Download job |
@@ -146,6 +155,9 @@ Exit codes: `0` ok · `1` failure · `2` usage · `3` auth/session · `4` partia
 | GET | `/api/v1/tasks` | Recent jobs |
 | GET | `/api/v1/status` | Latest job, or `?id=` |
 | POST | `/api/v1/cancel` | `{"id":"job_…"}` |
+| POST | `/api/v1/pause` | Pause an active task. `speedBps` drops to 0 |
+| POST | `/api/v1/resume` | Continue a paused / partial / failed download |
+| POST | `/api/v1/remove` | `{"id","deleteFiles"}`. Task status `removed` |
 
 `ok: true` on these responses means the HTTP call was accepted. Read `job.status` and `job.exitCode` for the Telegram job. `wait: false` (the POST default) returns **202** while the job is running.
 
@@ -171,7 +183,7 @@ downloads/<sanitized chat title>/<YYYY-MM>/<filename>
 
 - New CLI flag: add it in `cli.py`, accept it in `params.normalize_params` (keep that function idempotent), and add the field to the job `params` object. If it changes which files match, include it in `canonical_key`. Workers, timeout, and flood cap are intentionally **not** part of the key.
 - New JSON field: append it. Do not rename or remove. Bump nothing in `SCHEMA` unless you are shipping a breaking contract, which v1 does not do.
-- New endpoint: register it in `api.py` and `helptext.help_payload()`, then document it in `docs/AGENT_API.md`.
+- New endpoint: register it in `api.py` and `helptext.help_payload()`, then document it in `docs/AGENT_API.md`. UI copy lives in `tgdl/web/`; keep it on the loopback origin and do not put the API token in the HTML or the URL.
 - Download behavior: change `transfer.py` / `resume.py` and extend `tests/test_resume.py` or `tests/test_jobs_transfer.py`. Do not mock Telethon for those tests.
 - User-visible setup steps: edit `README.zh-CN.md`. Do not paste that manual into this file.
 

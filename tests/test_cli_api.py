@@ -13,16 +13,16 @@ class FakeService:
     def __init__(self) -> None:
         self.calls = []
 
-    async def list_chats(self, *, limit: int, groups_only: bool, wait: bool) -> dict:
-        self.calls.append(("list", limit, groups_only, wait))
+    async def list_chats(self, *, limit: int, groups_only: bool, wait: bool, added_by: str = "agent") -> dict:
+        self.calls.append(("list", limit, groups_only, wait, added_by))
         return {"existing": False, "job": _job("list-chats", "complete", 0)}
 
-    async def scan(self, params: dict, *, wait: bool) -> dict:
-        self.calls.append(("scan", params["chats"], wait))
+    async def scan(self, params: dict, *, wait: bool, added_by: str = "agent") -> dict:
+        self.calls.append(("scan", params["chats"], wait, added_by))
         return {"existing": False, "job": _job("scan", "complete", 0)}
 
-    async def download(self, params: dict, *, wait: bool) -> dict:
-        self.calls.append(("download", params["chats"], params["workers"], wait))
+    async def download(self, params: dict, *, wait: bool, added_by: str = "agent") -> dict:
+        self.calls.append(("download", params["chats"], params["workers"], wait, added_by))
         job = _job("download", "running", None)
         if wait:
             job["status"] = "complete"
@@ -48,6 +48,40 @@ class FakeService:
 
             raise TgdlError(f"job not found: {job_id}")
         return _job("download", "cancelled", 4, job_id=job_id)
+
+    async def account(self):
+        self.calls.append(("account",))
+        return {
+            "loggedIn": False,
+            "userId": None,
+            "username": None,
+            "displayName": None,
+            "reason": "not logged in; run: tgdl login",
+        }
+
+    async def pause(self, job_id: str):
+        self.calls.append(("pause", job_id))
+        if job_id == "missing":
+            from tgdl.errors import TgdlError
+
+            raise TgdlError(f"job not found: {job_id}")
+        return _job("download", "paused", 4, job_id=job_id)
+
+    async def resume(self, job_id: str):
+        self.calls.append(("resume", job_id))
+        if job_id == "missing":
+            from tgdl.errors import TgdlError
+
+            raise TgdlError(f"job not found: {job_id}")
+        return {"existing": True, "job": _job("download", "running", None, job_id=job_id)}
+
+    async def remove(self, job_id: str, *, delete_files: bool = False):
+        self.calls.append(("remove", job_id, delete_files))
+        if job_id == "missing":
+            from tgdl.errors import TgdlError
+
+            raise TgdlError(f"job not found: {job_id}")
+        return _job("download", "removed", 0, job_id=job_id)
 
 
 def _job(kind: str, status: str, code, job_id: str = "job_abc") -> dict:
@@ -90,10 +124,16 @@ def test_help_and_version_json(capsys):
     codes = [item["code"] for item in payload["exitCodes"]]
     assert codes == [0, 1, 2, 3, 4, 5]
     names = {item["name"] for item in payload["commands"]}
-    assert {"login", "list-chats", "scan", "download", "status", "serve", "version", "help"} <= names
+    assert {"login", "list-chats", "scan", "download", "status", "serve", "ui", "version", "help"} <= names
     paths = {item["path"] for item in payload["endpoints"]}
     assert "/api/v1/ping" in paths
     assert "/api/v1/download" in paths
+    assert "/api/v1/pause" in paths
+    assert "/api/v1/resume" in paths
+    assert "/api/v1/remove" in paths
+    assert "/api/v1/account" in paths
+    assert "/api/v1/ui/bootstrap" in paths
+    assert "/" in paths
 
     assert run(["version", "--json"]) == 0
     version = json.loads(capsys.readouterr().out)

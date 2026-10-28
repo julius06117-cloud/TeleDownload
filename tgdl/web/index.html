@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>tgdl · 本机下载</title>
+  <link rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="side">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">下</span>
+        <div>
+          <strong>tgdl</strong>
+          <span>本机群文件</span>
+        </div>
+      </div>
+      <nav class="tabs" role="tablist" aria-label="功能">
+        <button type="button" class="tab on" role="tab" id="tab-status" aria-selected="true" aria-controls="view-status" data-tab="status">状态</button>
+        <button type="button" class="tab" role="tab" id="tab-chats" aria-selected="false" aria-controls="view-chats" data-tab="chats">群组</button>
+        <button type="button" class="tab" role="tab" id="tab-scan" aria-selected="false" aria-controls="view-scan" data-tab="scan">扫描</button>
+        <button type="button" class="tab" role="tab" id="tab-download" aria-selected="false" aria-controls="view-download" data-tab="download">下载</button>
+        <button type="button" class="tab" role="tab" id="tab-jobs" aria-selected="false" aria-controls="view-jobs" data-tab="jobs">任务</button>
+      </nav>
+      <p class="side-note">页面只在这台电脑上打开。令牌不会出现在网址里。登录仍在终端执行 <code>tgdl login</code>。</p>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <p id="who" class="who">正在连接本机服务…</p>
+        <p id="version" class="version"></p>
+      </header>
+      <div id="overall" class="overall" hidden></div>
+      <p id="notice" class="notice" role="status" hidden></p>
+
+      <section id="view-status" class="view" role="tabpanel" aria-labelledby="tab-status">
+        <h2>登录状态</h2>
+        <article id="account" class="card">
+          <p>正在检查会话…</p>
+        </article>
+        <article id="login-help" class="card warn" hidden>
+          <h3>还没有可用的登录</h3>
+          <p>这个页面不能接收验证码。在终端完成一次登录，然后刷新。</p>
+          <ol>
+            <li>如果 <code>tgdl serve</code> 正在运行，先在那个终端按 Ctrl+C。会话文件同一时间只能由一个进程使用。</li>
+            <li>执行 <code>tgdl login</code>，按提示输入手机号、验证码，以及两步验证密码（如果开了）。</li>
+            <li>再执行 <code>tgdl ui</code>，或 <code>tgdl serve --open</code>。</li>
+          </ol>
+          <p class="muted">api_id 和 api_hash 写在 <code>.env</code> 或 <code>config.yaml</code>。不要提交到 git，也不要发到聊天里。</p>
+          <p id="login-reason" class="reason"></p>
+        </article>
+      </section>
+
+      <section id="view-chats" class="view" role="tabpanel" aria-labelledby="tab-chats" hidden>
+        <div class="section-head">
+          <h2>群组</h2>
+          <button type="button" id="load-chats" class="primary">读取群组</button>
+        </div>
+        <div class="toolbar">
+          <label class="check"><input id="groups-only" type="checkbox" checked> 只看群组和频道</label>
+          <label>最多条数 <input id="chat-limit" type="number" min="1" max="5000" value="100"></label>
+          <label class="grow">在结果里查找
+            <input id="chat-search" type="search" placeholder="标题或用户名">
+          </label>
+        </div>
+        <div id="chat-list" class="list">
+          <p class="empty">还没有读取。点「读取群组」从当前账号拉取对话。</p>
+        </div>
+      </section>
+
+      <section id="view-scan" class="view" role="tabpanel" aria-labelledby="tab-scan" hidden>
+        <h2>扫描</h2>
+        <p class="lede">选出要看的群，或直接填 <code>@用户名</code>、公开链接、邀请链接、数字 id。邀请链接会让当前账号加入那个群。扫描只列出文件，不写入磁盘。</p>
+        <div id="chips" class="chips" aria-live="polite"></div>
+        <div class="form-grid">
+          <label class="span">添加目标
+            <span class="inline">
+              <input id="target-input" placeholder="@group 或 https://t.me/…">
+              <button type="button" id="target-add">添加</button>
+            </span>
+          </label>
+          <label>后缀
+            <input id="f-ext" placeholder="pdf, zip" autocomplete="off">
+          </label>
+          <label>文件名包含
+            <input id="f-name" placeholder="报告" autocomplete="off">
+          </label>
+          <label>最小大小
+            <input id="f-min" placeholder="1MB" autocomplete="off">
+          </label>
+          <label>最大大小
+            <input id="f-max" placeholder="2GB" autocomplete="off">
+          </label>
+          <label>开始日期 <span class="hint">UTC，含当天</span>
+            <input id="f-since" type="date">
+          </label>
+          <label>结束日期 <span class="hint">UTC，含当天</span>
+            <input id="f-until" type="date">
+          </label>
+        </div>
+        <p class="muted">默认只处理文档，包含以文件形式发送的视频和音频，不包含图片。</p>
+        <div class="section-head">
+          <button type="button" id="scan-go" class="primary">开始扫描</button>
+          <button type="button" id="scan-to-download">用这些条件去下载</button>
+        </div>
+        <div id="scan-summary" class="summary"></div>
+        <div id="scan-files" class="table-wrap"></div>
+      </section>
+
+      <section id="view-download" class="view" role="tabpanel" aria-labelledby="tab-download" hidden>
+        <h2>下载</h2>
+        <p class="lede">使用扫描页里的目标和筛选。同一条件再跑一次时，已经下完且大小一致的文件会跳过，半成品从断点续传。</p>
+        <div id="download-targets" class="chips"></div>
+        <div class="form-grid">
+          <label>同时下载数 <span class="hint">1–32，默认 4</span>
+            <input id="f-workers" type="number" min="1" max="32" value="4">
+          </label>
+          <label>保存目录 <span class="hint">留空则用默认 downloads/</span>
+            <input id="f-output" placeholder="可留空" autocomplete="off">
+          </label>
+        </div>
+        <p class="muted">并发过高通常不会更快，反而容易被 Telegram 要求等待。中断后进度留在 <code>.part</code> 和旁边的 <code>.tgdl.json</code> 里。</p>
+        <div class="section-head">
+          <button type="button" id="download-go" class="primary">开始下载</button>
+          <button type="button" id="download-pause" hidden>暂停</button>
+          <button type="button" id="download-resume" hidden>继续</button>
+          <button type="button" id="download-remove" hidden>移除</button>
+          <label class="check" id="delete-files-wrap"><input id="delete-files" type="checkbox"> 同时删除文件</label>
+        </div>
+        <div id="download-progress" class="summary"></div>
+        <div id="download-files" class="table-wrap"></div>
+      </section>
+
+      <section id="view-jobs" class="view" role="tabpanel" aria-labelledby="tab-jobs" hidden>
+        <div class="section-head">
+          <h2>任务</h2>
+          <button type="button" id="reload-jobs">刷新</button>
+        </div>
+        <p class="lede">暂停或中断之后，状态是「已暂停」。点「继续」会接着已有的半成品下。速度只在下载进行中更新，停下来就是 0。</p>
+        <div id="job-list" class="list"></div>
+        <div id="job-detail"></div>
+      </section>
+    </div>
+  </div>
+  <noscript>
+    <p>需要启用 JavaScript。这是本机页面，脚本只访问 127.0.0.1 上的 tgdl。</p>
+  </noscript>
+  <script src="/ui/app.js" defer></script>
+</body>
+</html>

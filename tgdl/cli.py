@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 
@@ -96,9 +97,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("version", help="version and runtime", parents=[common])
     sub.add_parser("help", help="command catalog", parents=[common])
-    serve = sub.add_parser("serve", help="loopback HTTP API", parents=[common])
+    serve = sub.add_parser("serve", help="loopback HTTP API and web UI", parents=[common])
     serve.add_argument("--host", help="must be 127.0.0.1")
     serve.add_argument("--port", type=int)
+    serve.add_argument("--open", action="store_true", help="open the web UI in a browser")
+    ui = sub.add_parser("ui", help="open the local web UI (starts serve if needed)", parents=[common])
+    ui.add_argument("--host", help="must be 127.0.0.1")
+    ui.add_argument("--port", type=int)
+    ui.add_argument("--open", action="store_true", help="open a browser (already the default)")
     return parser
 
 
@@ -268,7 +274,59 @@ def _status(cfg, job_id: str | None, json_mode: bool) -> int:
     return 0
 
 
-async def _serve(cfg, host: str | None, port: int | None, json_mode: bool) -> int:
+def _listen_payload(port: int, token_file, *, pid: int, existing: bool) -> dict:
+    url = f"http://127.0.0.1:{port}"
+    return {
+        "schema": SCHEMA,
+        "ok": True,
+        "url": url,
+        "ui": f"{url}/",
+        "pid": pid,
+        "tokenFile": str(token_file),
+        "port": port,
+        "existing": existing,
+    }
+
+
+def _open_browser(url: str) -> None:
+    import webbrowser
+
+    try:
+        opened = bool(webbrowser.open(url))
+    except Exception:
+        opened = False
+    if not opened:
+        print(f"open this URL in a browser: {url}", file=sys.stderr)
+
+
+def _print_listen(payload: dict, json_mode: bool) -> None:
+    if json_mode:
+        emit(payload)
+        return
+    if payload.get("existing"):
+        print(f"web UI  {payload['ui']}  (server already running)", file=sys.stderr)
+    else:
+        print(f"web UI  {payload['ui']}", file=sys.stderr)
+        print(f"API     {payload['url']}/api/v1", file=sys.stderr)
+        print(f"token file {payload['tokenFile']}", file=sys.stderr)
+
+
+def _running_pid(data_dir) -> int:
+    try:
+        return int((data_dir / "api-pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return os.getpid()
+
+
+async def _serve(
+    cfg,
+    host: str | None,
+    port: int | None,
+    json_mode: bool,
+    *,
+    open_browser: bool = False,
+    reuse: bool = False,
+) -> int:
     from tgdl.api import start_api
     from tgdl.service import Service
 
@@ -276,6 +334,17 @@ async def _serve(cfg, host: str | None, port: int | None, json_mode: bool) -> in
     chosen_port = cfg.api_port if port is None else port
     existing = discover_api(cfg.data_dir)
     if existing is not None:
+        if reuse:
+            payload = _listen_payload(
+                existing.port,
+                (cfg.data_dir / "api-token").resolve(),
+                pid=_running_pid(cfg.data_dir),
+                existing=True,
+            )
+            _print_listen(payload, json_mode)
+            if open_browser:
+                _open_browser(payload["ui"])
+            return 0
         raise RejectedError(
             f"API already running at {existing.base}",
             url=existing.base,
@@ -291,19 +360,15 @@ async def _serve(cfg, host: str | None, port: int | None, json_mode: bool) -> in
         config=cfg,
     )
     write_runtime(cfg.data_dir, actual, token)
-    payload = {
-        "schema": SCHEMA,
-        "ok": True,
-        "url": f"http://127.0.0.1:{actual}",
-        "pid": __import__("os").getpid(),
-        "tokenFile": str((cfg.data_dir / "api-token").resolve()),
-        "port": actual,
-    }
-    if json_mode:
-        emit(payload)
-    else:
-        print(f"tgdl API {payload['url']}", file=sys.stderr)
-        print(f"token file {payload['tokenFile']}", file=sys.stderr)
+    payload = _listen_payload(
+        actual,
+        (cfg.data_dir / "api-token").resolve(),
+        pid=os.getpid(),
+        existing=False,
+    )
+    _print_listen(payload, json_mode)
+    if open_browser:
+        _open_browser(payload["ui"])
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -364,8 +429,17 @@ def _dispatch(args, json_mode: bool) -> int:
     if command == "status":
         job_id = getattr(args, "job", None) or getattr(args, "job_id", None)
         return _status(cfg, job_id, json_mode)
-    if command == "serve":
-        return asyncio.run(_serve(cfg, getattr(args, "host", None), getattr(args, "port", None), json_mode))
+    if command in {"serve", "ui"}:
+        return asyncio.run(
+            _serve(
+                cfg,
+                getattr(args, "host", None),
+                getattr(args, "port", None),
+                json_mode,
+                open_browser=command == "ui" or bool(getattr(args, "open", False)),
+                reuse=command == "ui",
+            )
+        )
 
     if command in {"scan", "download"}:
         from tgdl.params import normalize_params

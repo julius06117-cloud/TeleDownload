@@ -10,5 +10,6 @@ Key rules:
 - Resume via `iter_download` into `*.part` + `*.tgdl.json`. Align the offset to 4096 bytes. Do not use `download_media(path)` (it truncates).
 - Exit codes stay 0 ok, 1 failure, 2 usage, 3 auth, 4 partial, 5 rejected. JSON fields are add-only. Update `docs/AGENT_API.md` and `helptext.py` together.
 - API binds `127.0.0.1` only, bearer or `X-Token`, Host must be loopback. Tests bind `127.0.0.1` only.
+- The Chinese UI is static files in `tgdl/web/`, served on `GET /`. The API token is not in the HTML or the URL; the page reads it from loopback `GET /api/v1/ui/bootstrap`.
 - Never commit `.env`, `config.yaml`, `*.session`, `.tgdl/`, or API tokens. No credential flags.
 - Done = `pytest` passes, and `python -m tgdl help --json` still matches the parser.

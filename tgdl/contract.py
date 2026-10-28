@@ -30,6 +30,8 @@ JOB_STATUSES = (
     "partial",
     "cancelled",
     "rejected",
+    "paused",
+    "removed",
 )
 
 # File record state.

@@ -30,6 +30,9 @@ version = { attr = "tgdl.__version__" }
 [tool.setuptools.packages.find]
 include = ["tgdl*"]
 
+[tool.setuptools.package-data]
+tgdl = ["web/*.html", "web/*.css", "web/*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

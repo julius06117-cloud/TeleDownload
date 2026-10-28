@@ -23,7 +23,7 @@ tgdl help --json
 
 Create `api_id` and `api_hash` at <https://my.telegram.org> → API development tools. The first `tgdl login` is interactive and writes the session file. Later commands are non-interactive.
 
-There is no bundled binary and no GUI in v1.
+There is no bundled binary. Humans can use the CLI or the loopback web UI (`tgdl ui`, default `http://127.0.0.1:18765/`). Login stays on the CLI.
 
 ---
 
@@ -35,7 +35,8 @@ tgdl list-chats [--limit N] [--groups-only] [--json]
 tgdl scan --chat TARGET [--chat TARGET ...] [filters] [--json]
 tgdl download --chat TARGET ... [filters] [--workers N] [--json]
 tgdl status [JOB_ID | --job JOB_ID] [--json]
-tgdl serve [--host 127.0.0.1] [--port N] [--json]
+tgdl serve [--host 127.0.0.1] [--port N] [--open] [--json]
+tgdl ui [--host 127.0.0.1] [--port N] [--json]
 tgdl version [--json]
 tgdl help [--json]
 ```
@@ -201,13 +202,58 @@ Returned as `job` from scan, download, list-chats, status, task, and cancel.
 }
 ```
 
-- `status`: `queued | running | complete | error | partial | cancelled | rejected`. `queued` is reserved and not produced in v1.
-- `done` is true for `complete`, `error`, `partial`, `cancelled`, `rejected`.
+- `status`: `queued | running | complete | error | partial | cancelled | rejected | paused | removed`. `queued` is reserved and not produced in v1. `paused` and `removed` are control states from the web UI (`POST /api/v1/pause` and `POST /api/v1/remove`).
+- `done` is true when the worker is not running: `complete`, `error`, `partial`, `cancelled`, `rejected`, `paused`, `removed`.
 - `ok` is true only for `complete`.
 - `exitCode` is null while running, otherwise the process exit code.
-- `bytesTotal` is null if any file has an unknown size.
+- `bytesTotal` is null if any file has an unknown size. `bytesWritten` is the raw byte count.
 - `kind: "list-chats"` puts dialogs in `resolvedChats` and leaves `files` empty.
-- `error` is a short English string or null.
+- `error` is a short string or null. CLI failures stay English. Pause / remove messages written by the UI actions may be Chinese.
+
+### Hornet-aligned task view
+
+The same job also carries a [HornetDownloader](https://github.com/julius06117-cloud/HornetDownloader/blob/main/docs/AGENT_API.md) task object on `job.task`, plus the same fields flattened onto the job where the names do not collide (`name`, `dir`, `totalBytes`, `doneBytes`, `progress`, `speedBps`, `source`, `addedBy`, `paths`, `taskStatus`, `resuming`, `etaSec`).
+
+`job.files` stays the rich Telegram file records. Hornet's `files` (destination path strings) is `job.task.files` and `job.paths`. `job.status` / `job.done` / `job.ok` stay the tgdl lifecycle above. The UI reads `job.task`.
+
+```json
+{
+  "id": "job_0123456789abcdef",
+  "status": "active",
+  "done": false,
+  "ok": false,
+  "name": "report.pdf",
+  "dir": "/abs/downloads",
+  "files": ["/abs/downloads/Files/2024-05/report.pdf"],
+  "totalBytes": 2097152,
+  "doneBytes": 1048576,
+  "progress": 0.5,
+  "speedBps": 524288,
+  "error": null,
+  "source": "Files (@files)",
+  "addedBy": "user",
+  "resuming": true,
+  "etaSec": 2
+}
+```
+
+| Hornet `task.status` | tgdl `job.status` | `task.done` | `speedBps` |
+|----------------------|-------------------|-------------|------------|
+| `waiting` | `queued` | false | 0 |
+| `active` | `running` | false | measured, else 0 |
+| `paused` | `paused`, `partial`, or `cancelled` | false | 0 |
+| `complete` | `complete` | true | 0 |
+| `error` | `error` or `rejected` | true | 0 |
+| `removed` | `removed` | true | 0 |
+
+- `progress` is a float from 0 to 1 (`doneBytes / totalBytes`). It is `1` when the task is `complete`. It is `0` when the total size is still unknown (`bytesTotal` null); `totalBytes` is then `0` so the field stays a number.
+- `speedBps` is bytes/second over the last few samples. It is **0 whenever `task.status` is not `active`**, including paused and finished tasks, so a stale rate is never shown.
+- `etaSec` is seconds remaining when `active` and `speedBps > 0`. Otherwise null. Hornet does not define this field; it is additive.
+- `resuming` is true only while `active` and a file is continuing from a `.part` (`plannedAction: "resume"` or a non-zero `resumeOffset`). Status stays `active`.
+- `addedBy` is `agent` (CLI and API default) or `user` (the web UI sends it on list / scan / download). It is not part of the idempotency key.
+- `source` is the chat title list (`Title (@username)`), or the raw `--chat` values before resolution. `sourceChats` is not a separate object; `resolvedChats` remains the structured form.
+- `name` is the single file name, or `N 个文件 · <source>` when a download matched several files.
+- `dir` is `params.output`.
 
 ### File object
 
@@ -288,16 +334,23 @@ Base URL `http://127.0.0.1:<port>` (default port **18765**). The live port is `.
 
 | Method & path | Body / query | Response |
 |---------------|--------------|----------|
+| `GET /` | — | Chinese web UI (HTML). No bearer token. Loopback `Host` and peer only |
+| `GET /ui/app.js`, `GET /ui/app.css` | — | UI assets. No bearer token. Same loopback checks |
+| `GET /api/v1/ui/bootstrap` | header `X-Tgdl-Ui: 1` | `{schema, ok, token, tokenHeader, tokenScheme}`. See below. No bearer token |
 | `GET /api/v1/ping` | — | `{schema, ok, app:"tgdl", version, pid, python, telethon}` |
 | `GET /api/v1/version` | — | version object, plus `ok` |
 | `GET /api/v1/help` | — | help catalog, plus `ok` |
+| `GET /api/v1/account` | — | `{schema, ok, loggedIn, userId, username, displayName, reason}`. Does not create a job. `loggedIn: false` is still HTTP 200 |
 | `GET /api/v1/chats` | `limit` (default 100, max 5000), `groupsOnly` (`true`/`false`), `wait` (default `true`) | job envelope. `groupsOnly` skips private users and keeps groups and channels |
 | `POST /api/v1/scan` | filter object; `wait` default **false** | job envelope |
 | `POST /api/v1/download` | filter object; `wait` default **false** | job envelope |
 | `GET /api/v1/task?id=` | — | `{schema, ok, exitCode, job}` or 404 |
 | `GET /api/v1/tasks?limit=` | `limit` default 50, max 200 | `{schema, ok, tasks:[job...]}` |
 | `GET /api/v1/status` | optional `id` | `{schema, ok, exitCode, job}`. `job` is null when nothing has run |
-| `POST /api/v1/cancel` | `{id}` | `{schema, ok, exitCode, job}`. 404 if unknown |
+| `POST /api/v1/cancel` | `{id}` | `{schema, ok, id, exitCode, job}`. 404 if unknown. Stops the worker; tgdl status `cancelled` (task status `paused`) |
+| `POST /api/v1/pause` | `{id}` | `{schema, ok, id, exitCode, job}`. Active task only. Finishes the current chunk, keeps `.part` files, sets tgdl status `paused`. 409 if it is not active. Already paused returns the same job |
+| `POST /api/v1/resume` | `{id}` | Job envelope, same shape as `POST /download`. Continues a `paused`, `partial`, `cancelled`, or `error` download from the part files. 404 if unknown, 409 if `removed` |
+| `POST /api/v1/remove` | `{id, deleteFiles?}` | `{schema, ok, id, deleteFiles, job}`. Marks the task `removed`. `deleteFiles: true` unlinks recorded dest, `.part`, and `.tgdl.json` paths. 404 if unknown |
 
 ### Job envelope
 
@@ -334,12 +387,34 @@ curl -fsS -H "Authorization: Bearer $token" -H 'Content-Type: application/json' 
 `serve --json` prints one line and then keeps running:
 
 ```json
-{"schema":1,"ok":true,"url":"http://127.0.0.1:18765","pid":123,"tokenFile":"/abs/.tgdl/api-token","port":18765}
+{"schema":1,"ok":true,"url":"http://127.0.0.1:18765","ui":"http://127.0.0.1:18765/","pid":123,"tokenFile":"/abs/.tgdl/api-token","port":18765,"existing":false}
 ```
 
-The token value is not printed. Read the file.
+The token value is not printed. Read the file. `ui` is the page to open in a browser. `existing` is true only when `tgdl ui` attached to a server that was already up.
 
-If serve is already up, a second `tgdl serve` exits 5. The CLI then proxies `list-chats`, `scan`, and `download` to it so two processes do not open the session. `status` reads the job files on disk (the server flushes them at least every 0.4s and on every state change).
+If serve is already up, a second `tgdl serve` exits 5. `tgdl ui` in that case only opens the browser and exits 0. The CLI then proxies `list-chats`, `scan`, and `download` to the live server so two processes do not open the session. `status` reads the job files on disk (the server flushes them at least every 0.4s and on every state change).
+
+### Web UI
+
+`tgdl serve` serves the API and a static Chinese UI from `tgdl/web/` at `http://127.0.0.1:<port>/` (default port **18765**). `tgdl serve --open` and `tgdl ui` also open that URL in a browser. `tgdl ui` starts the server when it is not already running.
+
+The HTML, CSS, and JS do not contain the API token. On load, the page calls `GET /api/v1/ui/bootstrap` with `X-Tgdl-Ui: 1` and stores the token in `sessionStorage`, then sends `Authorization: Bearer` on `/api/v1/*` like any other client. The token is not placed in the URL.
+
+Bootstrap is not a remote API. It is refused unless all of these hold:
+
+- TCP peer is loopback (`127.0.0.1` or `::1`)
+- `Host` is `127.0.0.1:<port>` or `localhost:<port>` (same rule as every other route)
+- `X-Tgdl-Ui: 1` is set (a cross-origin page cannot set it without a preflight, and preflight is 405 with no CORS headers)
+- `Sec-Fetch-Site` is not `cross-site`
+- `Origin`, when present, is exactly `http://127.0.0.1:<port>` or `http://localhost:<port>`
+
+Responses set `Cross-Origin-Resource-Policy: same-origin` and do not send `Access-Control-Allow-Origin`. `Cache-Control` on the bootstrap body is `no-store`. A browser on another machine cannot read it. Any process that can already connect to `127.0.0.1` can, which is the same machine the UI is for. Agents should keep reading `.tgdl/api-token` and should not log the bootstrap body.
+
+`GET /api/v1/account` is the logged-in check the UI uses. It does not replace `tgdl login`. There is still no HTTP endpoint for the phone code. `reason` is a short English string when `loggedIn` is false (`not logged in; run: tgdl login`, or a missing `api_id` / `api_hash` message).
+
+The page lists chats, scans with chat / extension / size / since / until / name, and polls `job.task` while work is running. The task table shows name, status, progress percent, `doneBytes/totalBytes`, speed (from `speedBps`), and `error`. An overall bar sums every `active` task.
+
+Controls, in Chinese: **开始下载** (`POST /download` with `addedBy: "user"`), **暂停** (`POST /pause`), **继续** (`POST /resume`), **移除** (`POST /remove`, optional `deleteFiles`). `speedBps` on screen is 0 unless the task is `active`. A `partial` or `cancelled` download is shown as paused and continues from the part files.
 
 ---
 
@@ -363,7 +438,7 @@ Relative paths are resolved against the process working directory. Start `tgdl s
 
 ## 7. What v1 does not do
 
-- No WebView, no web UI, no bot token login.
-- No HTTP endpoint for the interactive phone-code login.
+- No bot-token login, and no phone-code login over HTTP. The web UI tells the human to run `tgdl login`.
 - No multi-process downloads against one session file.
 - No per-file multi-connection download. Workers download different files.
+- The web UI is loopback static files plus the JSON API. It is not a separate frontend service.
